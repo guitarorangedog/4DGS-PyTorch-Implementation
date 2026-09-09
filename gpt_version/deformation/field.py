@@ -45,6 +45,7 @@ __all__ = [
     "DeformedState",
     "DeformationField",
     "quaternion_multiply",
+    "field_config_from_state_dict",
 ]
 
 
@@ -67,6 +68,46 @@ class DeformedState:
     rotation: torch.Tensor  #: ``[N, 4]`` RAW quaternions.
     opacity: torch.Tensor | None = None  #: ``[N, 1]`` raw logits (if given).
     shs: torch.Tensor | None = None  #: ``[N, K, 3]`` raw SH (if given).
+
+
+def field_config_from_state_dict(sd: dict) -> FieldConfig:
+    """Reconstruct the field config from a saved ``state_dict``.
+
+    Per-level multipliers are ratios to the first level (all official
+    configs start at 1: ``[1, 2]``, ``[1, 2, 4, 8]``); the spatial base is
+    the first level's resolution (64 in every official config) and the
+    temporal base is read off the ``xt`` plane (unmultiscaled). Decoder
+    width/depth come from trunk weight shapes. Enables direct model
+    evaluation from ``deformation.pth`` without a config sidecar.
+    """
+    from deformation.decoder import DecoderConfig
+    from deformation.hexplane import HexPlaneConfig
+
+    levels = sorted({int(k.split(".")[2]) for k in sd if k.startswith("hexplane.grids.")})
+    assert levels == list(range(len(levels))), sorted(levels)
+    p0 = sd[f"hexplane.grids.{levels[0]}.0"]  # xy: [1, F, res, res]
+    feat = p0.shape[1]
+    base = p0.shape[2]
+    multires = []
+    for lv in levels:
+        shape = sd[f"hexplane.grids.{lv}.0"].shape
+        assert shape[1] == feat and shape[2] == shape[3]
+        mult, rem = divmod(shape[2], base)
+        assert rem == 0, f"non-integral resolution ratio {shape[2]} / {base}"
+        multires.append(mult)
+    assert multires[0] == 1
+    time_res = sd[f"hexplane.grids.{levels[0]}.2"].shape[2]  # xt: [1, F, T, S]
+    trunk_linears = sorted({int(k.split(".")[2]) for k in sd
+                            if k.startswith("decoder.trunk.") and k.endswith(".weight")})
+    width = sd["decoder.trunk.0.weight"].shape[0]
+    has_aux = any(k.startswith("aux.") for k in sd)
+    return FieldConfig(
+        hexplane=HexPlaneConfig(output_coordinate_dim=feat,
+                                resolution=[base, base, base, time_res],
+                                multires=multires),
+        decoder=DecoderConfig(width=width, depth=len(trunk_linears)),
+        enable_aux=has_aux,
+    )
 
 
 def quaternion_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
