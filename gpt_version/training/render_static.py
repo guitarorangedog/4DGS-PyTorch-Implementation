@@ -165,12 +165,15 @@ def main(argv=None) -> None:
                         choices=["train", "test", "video", "all"])
     parser.add_argument("--background", choices=["white", "black"], default="white")
     parser.add_argument("--extension", default=".png")
+    parser.add_argument("--dataset_type", choices=["auto", "dnerf", "dynerf", "hypernerf"],
+                        default="auto")
     parser.add_argument("--no_gt", action="store_true")
     args = parser.parse_args(argv)
 
     device = torch.device("cuda")
     scene = load_scene(args.source, white_background=(args.background == "white"),
-                       eval_mode=True, extension=args.extension)
+                       eval_mode=True, extension=args.extension,
+                       dataset_type=None if args.dataset_type == "auto" else args.dataset_type)
     model = load_static_model(args.model, device=device)
     splits = list(SPLITS) if args.split == "all" else [args.split]
     bg = (1.0, 1.0, 1.0) if args.background == "white" else (0.0, 0.0, 0.0)

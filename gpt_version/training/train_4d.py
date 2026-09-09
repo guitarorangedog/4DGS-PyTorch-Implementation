@@ -27,6 +27,8 @@ def main(argv=None) -> None:
     parser.add_argument("--extension", default=".png")
     parser.add_argument("--background", choices=["white", "black"], default="white")
     parser.add_argument("--no_eval", action="store_true")
+    parser.add_argument("--dataset_type", choices=["auto", "dnerf", "dynerf", "hypernerf"],
+                        default="auto")
     parser.add_argument("--resume", default=None,
                         help="resume from checkpoint_*.pth (continues at N+1)")
     parser.add_argument("--checkpoint_interval", type=int, default=0,
@@ -35,7 +37,8 @@ def main(argv=None) -> None:
 
     set_seed(args.seed)
     scene = load_scene(args.source, white_background=(args.background == "white"),
-                       eval_mode=(not args.no_eval), extension=args.extension, seed=args.seed)
+                       eval_mode=(not args.no_eval), extension=args.extension, seed=args.seed,
+                       dataset_type=None if args.dataset_type == "auto" else args.dataset_type)
     cfg = FourDTrainerConfig(coarse_iterations=args.coarse_iterations,
                              fine_iterations=args.fine_iterations, seed=args.seed)
     cfg.optim.lambda_dssim = args.lambda_dssim
