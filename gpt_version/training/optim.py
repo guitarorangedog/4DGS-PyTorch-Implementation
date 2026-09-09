@@ -26,9 +26,12 @@ from training.schedules import get_expon_lr_func
 
 __all__ = [
     "StaticTrainingConfig",
+    "DeformationOptimConfig",
     "setup_static_optimizer",
+    "setup_4d_optimizer",
     "get_group",
     "update_xyz_lr",
+    "update_4d_lrs",
 ]
 
 
@@ -46,6 +49,41 @@ class StaticTrainingConfig:
     rotation_lr: float = 0.001
     percent_dense: float = 0.01
     lambda_dssim: float = 0.0  # official 4DGS default (pure L1); 3D-GS used 0.2
+
+
+@dataclass
+class DeformationOptimConfig:
+    """Official D-NeRF deformation/grid LR hyperparameters.
+
+    Traced from ``arguments/dnerf/dnerf_default.py`` (which OVERRIDES the
+    global ``arguments/__init__.py`` defaults): D-NeRF uses finals
+    ``deformation 1.6e-4 -> 1.6e-6`` and ``grid 1.6e-3 -> 1.6e-5``
+    (global defaults are 1.6e-5 and 1.6e-4 respectively — do not confuse
+    them). All three schedules share the xyz horizon
+    (``position_lr_max_steps``) and the deformation delay multiplier.
+    """
+
+    deformation_lr_init: float = 0.00016
+    deformation_lr_final: float = 0.0000016
+    deformation_lr_delay_mult: float = 0.01
+    grid_lr_init: float = 0.0016
+    grid_lr_final: float = 0.000016
+    lr_max_steps: int = 20_000
+
+
+def _static_groups(model, cfg: StaticTrainingConfig, spatial_lr_scale: float) -> list[dict]:
+    params = dict(model.static_param_groups())
+    assert tuple(params) == OPTIM_GROUP_NAMES, tuple(params)
+    lrs = {
+        "xyz": cfg.position_lr_init * spatial_lr_scale,
+        "f_dc": cfg.feature_lr,
+        "f_rest": cfg.feature_lr / 20.0,
+        "opacity": cfg.opacity_lr,
+        "scaling": cfg.scaling_lr,
+        "rotation": cfg.rotation_lr,
+    }
+    return [{"params": [params[name]], "lr": lrs[name], "name": name}
+            for name in OPTIM_GROUP_NAMES]
 
 
 def setup_static_optimizer(model, cfg: StaticTrainingConfig | None = None,
@@ -66,19 +104,8 @@ def setup_static_optimizer(model, cfg: StaticTrainingConfig | None = None,
     """
     if cfg is None:
         cfg = StaticTrainingConfig()
-    lrs = {
-        "xyz": cfg.position_lr_init * spatial_lr_scale,
-        "f_dc": cfg.feature_lr,
-        "f_rest": cfg.feature_lr / 20.0,
-        "opacity": cfg.opacity_lr,
-        "scaling": cfg.scaling_lr,
-        "rotation": cfg.rotation_lr,
-    }
-    params = dict(model.static_param_groups())
-    assert tuple(params) == OPTIM_GROUP_NAMES, tuple(params)
-    groups = [{"params": [params[name]], "lr": lrs[name], "name": name}
-              for name in OPTIM_GROUP_NAMES]
-    model.optimizer = torch.optim.Adam(groups, lr=0.0, eps=1e-15)
+    model.optimizer = torch.optim.Adam(
+        _static_groups(model, cfg, spatial_lr_scale), lr=0.0, eps=1e-15)
     model.spatial_lr_scale = spatial_lr_scale
     model.percent_dense = cfg.percent_dense
     model.xyz_schedule = get_expon_lr_func(
@@ -86,6 +113,62 @@ def setup_static_optimizer(model, cfg: StaticTrainingConfig | None = None,
         lr_final=cfg.position_lr_final * spatial_lr_scale,
         lr_delay_mult=cfg.position_lr_delay_mult,
         max_steps=cfg.position_lr_max_steps,
+    )
+    init_densify_stats(model)
+    return model.optimizer
+
+
+def setup_4d_optimizer(model, field, static_cfg: StaticTrainingConfig | None = None,
+                       deform_cfg: DeformationOptimConfig | None = None,
+                       spatial_lr_scale: float = 1.0) -> torch.optim.Adam:
+    """Create the full eight-group 4D optimizer (official ``training_setup``).
+
+    Six single-parameter Gaussian groups (identical to
+    :func:`setup_static_optimizer`) PLUS two multi-parameter groups::
+
+        "deformation": decoder (+ aux) MLP params, LR ``deform_init * scale``
+        "grid": HexPlane grid params, LR ``grid_init * scale``
+
+    Multi-parameter groups are intentionally skipped by the Commit 5
+    append/prune surgery (mirroring official ``_prune_optimizer``, which
+    skips ``len(params) > 1`` groups): densification only reshapes
+    per-Gaussian tensors. Schedules for xyz/deformation/grid are stored as
+    ``model.xyz_schedule`` / ``model.deform_schedule`` / ``model.grid_schedule``.
+
+    Called fresh at EACH stage (official ``training_setup`` per
+    ``scene_reconstruction``): fresh Adam state + zeroed densify stats.
+    """
+    if static_cfg is None:
+        static_cfg = StaticTrainingConfig()
+    if deform_cfg is None:
+        deform_cfg = DeformationOptimConfig()
+    groups = _static_groups(model, static_cfg, spatial_lr_scale)
+    groups.append({"params": list(field.get_mlp_parameters()),
+                   "lr": deform_cfg.deformation_lr_init * spatial_lr_scale,
+                   "name": "deformation"})
+    groups.append({"params": list(field.get_grid_parameters()),
+                   "lr": deform_cfg.grid_lr_init * spatial_lr_scale,
+                   "name": "grid"})
+    model.optimizer = torch.optim.Adam(groups, lr=0.0, eps=1e-15)
+    model.spatial_lr_scale = spatial_lr_scale
+    model.percent_dense = static_cfg.percent_dense
+    model.xyz_schedule = get_expon_lr_func(
+        lr_init=static_cfg.position_lr_init * spatial_lr_scale,
+        lr_final=static_cfg.position_lr_final * spatial_lr_scale,
+        lr_delay_mult=static_cfg.position_lr_delay_mult,
+        max_steps=static_cfg.position_lr_max_steps,
+    )
+    model.deform_schedule = get_expon_lr_func(
+        lr_init=deform_cfg.deformation_lr_init * spatial_lr_scale,
+        lr_final=deform_cfg.deformation_lr_final * spatial_lr_scale,
+        lr_delay_mult=deform_cfg.deformation_lr_delay_mult,
+        max_steps=deform_cfg.lr_max_steps,
+    )
+    model.grid_schedule = get_expon_lr_func(
+        lr_init=deform_cfg.grid_lr_init * spatial_lr_scale,
+        lr_final=deform_cfg.grid_lr_final * spatial_lr_scale,
+        lr_delay_mult=deform_cfg.deformation_lr_delay_mult,
+        max_steps=deform_cfg.lr_max_steps,
     )
     init_densify_stats(model)
     return model.optimizer
@@ -102,8 +185,7 @@ def get_group(model, name: str) -> dict:
 def update_xyz_lr(model, iteration: int) -> float:
     """Step the xyz schedule; all other groups keep constant LRs.
 
-    Mirrors the ``"xyz"`` branch of official ``update_learning_rate``
-    (deformation/grid branches arrive in Commit 16).
+    Static-trainer path (Commit 8). The 4D path uses :func:`update_4d_lrs`.
 
     Returns:
         The new xyz learning rate.
@@ -111,3 +193,27 @@ def update_xyz_lr(model, iteration: int) -> float:
     lr = model.xyz_schedule(iteration)
     get_group(model, "xyz")["lr"] = lr
     return lr
+
+
+def update_4d_lrs(model, iteration: int) -> dict[str, float]:
+    """Step xyz + deformation + grid schedules (official ``update_learning_rate``).
+
+    Mirrors the official branch structure (``xyz`` by name, ``"grid" in name``,
+    ``deformation`` by name); all other groups keep constant LRs.
+
+    Returns:
+        ``{"xyz": lr, "deformation": lr, "grid": lr}``.
+    """
+    lrs = {
+        "xyz": model.xyz_schedule(iteration),
+        "deformation": model.deform_schedule(iteration),
+        "grid": model.grid_schedule(iteration),
+    }
+    for group in model.optimizer.param_groups:
+        if group["name"] == "xyz":
+            group["lr"] = lrs["xyz"]
+        if "grid" in group["name"]:
+            group["lr"] = lrs["grid"]
+        elif group["name"] == "deformation":
+            group["lr"] = lrs["deformation"]
+    return lrs

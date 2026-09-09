@@ -50,10 +50,17 @@ SH_COEFFS_PER_CHANNEL = 16
 
 @dataclass
 class DecoderConfig:
-    """Official ``ModelHiddenParams`` decoder defaults."""
+    """Official ``ModelHiddenParams`` decoder defaults (``net_width = 64``).
+
+    Depth mapping (naming difference, NOT architectural): official
+    ``defor_depth`` counts EXTRA trunk layers (``range(D - 1)`` appended
+    after the first Linear), so D-NeRF's ``defor_depth = 0`` builds a
+    SINGLE-Linear trunk. Here ``depth`` counts TOTAL trunk Linears, so the
+    faithful D-NeRF equivalent is ``depth = 1`` (the default).
+    """
 
     width: int = 64  #: ``net_width``: trunk/head hidden dim.
-    depth: int = 1  #: ``defor_depth``: trunk Linear count (D=1 -> single Linear).
+    depth: int = 1  #: total trunk Linears (1 == official ``defor_depth = 0``).
 
 
 @dataclass

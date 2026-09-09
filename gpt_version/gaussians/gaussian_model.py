@@ -126,6 +126,9 @@ class CanonicalGaussianModel(nn.Module):
         self.max_radii2D: torch.Tensor | None = None
         #: Exponential xyz LR schedule, installed by ``setup_static_optimizer``.
         self.xyz_schedule = None
+        #: Deformation/grid schedules, installed by ``setup_4d_optimizer`` (Commit 16).
+        self.deform_schedule = None
+        self.grid_schedule = None
 
     def static_param_groups(self) -> list[tuple[str, nn.Parameter]]:
         """Named ``(group_name, parameter)`` pairs for optimizer construction.

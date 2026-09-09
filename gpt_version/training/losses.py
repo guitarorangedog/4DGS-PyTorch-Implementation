@@ -21,7 +21,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-__all__ = ["l1_loss", "ssim", "reconstruction_loss"]
+__all__ = ["l1_loss", "ssim", "reconstruction_loss", "reconstruction_loss_4dgs"]
 
 
 def l1_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
@@ -91,3 +91,19 @@ def reconstruction_loss(pred: torch.Tensor, gt: torch.Tensor, lambda_dssim: floa
     if lambda_dssim == 0.0:
         return l1
     return (1.0 - lambda_dssim) * l1 + lambda_dssim * (1.0 - ssim(pred, gt))
+
+
+def reconstruction_loss_4dgs(pred: torch.Tensor, gt: torch.Tensor,
+                             lambda_dssim: float = 0.0) -> torch.Tensor:
+    """Official 4DGaussians reconstruction loss: ``L1 + λ * (1 - SSIM)``.
+
+    Verbatim ``train.py`` semantics (NOT the canonical ``(1-λ)`` form above):
+    the full L1 term is always kept and the DSSIM term is added on top.
+    Official default ``λ = 0`` reduces both forms to pure ``L1``. The Commit
+    16 fine stage must use THIS form.
+    """
+    assert 0.0 <= lambda_dssim <= 1.0
+    l1 = l1_loss(pred, gt)
+    if lambda_dssim == 0.0:
+        return l1
+    return l1 + lambda_dssim * (1.0 - ssim(pred, gt))
