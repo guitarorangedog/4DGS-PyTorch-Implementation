@@ -1,49 +1,66 @@
-"""CLI: coarse-to-fine 4D-GS training on a D-NeRF scene (Commit 16).
+"""CLI: coarse-to-fine 4D-GS training (Commit 16; configs wired in Commit 20).
 
 Usage (from ``gpt_version/``)::
 
-    python -m training.train_4d --source <dnerf_dir> --output ./output/4d \\
-        --coarse_iterations 3000 --fine_iterations 20000 --seed 0
+    python -m training.train_4d --source <scene_dir> --output ./output/4d \\
+        --dataset_type dnerf --coarse_iterations 3000 --fine_iterations 20000
 """
 
 import argparse
 import os
+from dataclasses import replace
 
 import torch
 
-from data.scene import load_scene
-from training.trainer_4d import init_4d_model, save_4d_model, train_4d, FourDTrainerConfig
+from configs import get_trainer_config
+from data.scene import detect_dataset, load_scene
+from training.trainer_4d import init_4d_model, save_4d_model, train_4d
 from training.trainer_static import set_seed
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Coarse-to-fine 4D-GS training (Commit 16)")
+    parser = argparse.ArgumentParser(description="Coarse-to-fine 4D-GS training")
     parser.add_argument("--source", required=True)
     parser.add_argument("--output", default="./output/4d")
-    parser.add_argument("--coarse_iterations", type=int, default=3000)
-    parser.add_argument("--fine_iterations", type=int, default=20_000)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--lambda_dssim", type=float, default=0.0)
-    parser.add_argument("--extension", default=".png")
-    parser.add_argument("--background", choices=["white", "black"], default="white")
-    parser.add_argument("--no_eval", action="store_true")
     parser.add_argument("--dataset_type", choices=["auto", "dnerf", "dynerf", "hypernerf"],
-                        default="auto")
+                        default="auto",
+                        help="selects BOTH the data reader and the faithful "
+                             "per-dataset training config (auto = detect).")
+    parser.add_argument("--coarse_iterations", type=int, default=None)
+    parser.add_argument("--fine_iterations", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--lambda_dssim", type=float, default=None)
+    parser.add_argument("--extension", default=".png")
+    parser.add_argument("--background", choices=["white", "black"], default=None,
+                        help="default: per-dataset official value "
+                             "(dnerf white, dynerf black, hypernerf white).")
+    parser.add_argument("--no_eval", action="store_true")
     parser.add_argument("--resume", default=None,
                         help="resume from checkpoint_*.pth (continues at N+1)")
     parser.add_argument("--checkpoint_interval", type=int, default=0,
                         help="save end-of-iteration checkpoints every N iters (0=off)")
     args = parser.parse_args(argv)
 
+    dtype = args.dataset_type
+    if dtype == "auto":
+        dtype = detect_dataset(args.source)
+    print(f"Dataset: {dtype}")
+
     set_seed(args.seed)
-    scene = load_scene(args.source, white_background=(args.background == "white"),
-                       eval_mode=(not args.no_eval), extension=args.extension, seed=args.seed,
-                       dataset_type=None if args.dataset_type == "auto" else args.dataset_type)
-    cfg = FourDTrainerConfig(coarse_iterations=args.coarse_iterations,
-                             fine_iterations=args.fine_iterations, seed=args.seed)
-    cfg.optim.lambda_dssim = args.lambda_dssim
-    if args.background == "black":
-        cfg.background = (0.0, 0.0, 0.0)
+    bg = None if args.background is None else (args.background == "white")
+    scene = load_scene(args.source, white_background=bg,
+                       eval_mode=(not args.no_eval), extension=args.extension,
+                       seed=args.seed, dataset_type=dtype)
+    over = {"seed": args.seed}
+    if args.coarse_iterations is not None:
+        over["coarse_iterations"] = args.coarse_iterations
+    if args.fine_iterations is not None:
+        over["fine_iterations"] = args.fine_iterations
+    cfg = replace(get_trainer_config(dtype), **over)
+    if args.lambda_dssim is not None:
+        cfg.optim.lambda_dssim = args.lambda_dssim
+    if args.background is not None:
+        cfg.background = (1.0, 1.0, 1.0) if args.background == "white" else (0.0, 0.0, 0.0)
 
     device = torch.device("cuda")
     model, field = init_4d_model(scene, cfg, device=device)

@@ -284,7 +284,7 @@ def train_4d(scene: Scene, model: CanonicalGaussianModel, field: DeformationFiel
         checkpoint_interval: save end-of-iteration checkpoints every N iters
             (0 = off).
     """
-    from training.checkpoints import load_checkpoint, restore_4d_state
+    from training.checkpoints import assert_field_compatible, load_checkpoint, restore_4d_state
 
     device = torch.device(device)
     if not torch.cuda.is_available():
@@ -298,6 +298,7 @@ def train_4d(scene: Scene, model: CanonicalGaussianModel, field: DeformationFiel
                                checkpoint_cb=cb)
         return {"coarse": coarse_hist, "fine": fine_hist}
     payload = load_checkpoint(resume, map_location=device)
+    assert_field_compatible(payload, cfg)
     loop_rng = random.Random()
     restore_4d_state(model, field, payload, cfg.optim, cfg.deform_optim,
                      device, loop_rng)

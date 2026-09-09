@@ -36,6 +36,7 @@ __all__ = [
     "save_checkpoint",
     "load_checkpoint",
     "restore_4d_state",
+    "assert_field_compatible",
 ]
 
 
@@ -144,6 +145,32 @@ def restore_4d_model_params(model, payload: dict, device) -> None:
     model.xyz_gradient_accum = s["xyz_gradient_accum"].to(device)
     model.denom = s["denom"].to(device)
     model.max_radii2D = s["max_radii2D"].to(device)
+
+
+def assert_field_compatible(payload: dict, cfg) -> None:
+    """Fail clearly if the CLI config's field arch differs from the checkpoint.
+
+    Called on resume BEFORE restore (``restore_4d_state`` re-checks against
+    the constructed field as a backstop). Prevents silently training a
+    dynerf-arch checkpoint with hypernerf config or vice versa.
+    """
+    fc = payload["field_config"]
+    ours = cfg.field
+    problems = []
+    if list(fc["multires"]) != list(ours.hexplane.multires):
+        problems.append(f"multires ckpt={fc['multires']} vs cfg={list(ours.hexplane.multires)}")
+    if fc["output_coordinate_dim"] != ours.hexplane.output_coordinate_dim:
+        problems.append("output_coordinate_dim mismatch")
+    if list(fc["resolution"]) != list(ours.hexplane.resolution):
+        problems.append("resolution mismatch")
+    if fc["width"] != ours.decoder.width or fc["depth"] != ours.decoder.depth:
+        problems.append("decoder width/depth mismatch")
+    if fc["apply_rotation"] != ours.apply_rotation:
+        problems.append("apply_rotation mismatch")
+    if fc["enable_aux"] != ours.enable_aux:
+        problems.append("enable_aux mismatch")
+    if problems:
+        raise ValueError("Checkpoint/config architecture conflict: " + "; ".join(problems))
 
 
 def restore_4d_state(model, field, payload: dict, static_cfg, deform_cfg, device,
