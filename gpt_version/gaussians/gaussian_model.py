@@ -39,6 +39,10 @@ Documented deviations (no silent changes):
   ``[N, 3]`` tensors instead of the NumPy struct; the math is identical.
 - No optimizer groups or densification here (Commits 5+); this class only
   holds parameters and (de)serializes them.
+- Optimizer / densification buffers (``optimizer``, ``xyz_gradient_accum``,
+  ``denom``, ``max_radii2D``) are declared below as ``None`` and owned by
+  ``gaussians/densify.py`` (``attach_optimizer`` / ``init_densify_stats``);
+  the full per-group training optimizer and schedulers arrive in Commit 8.
 """
 
 import os
@@ -107,6 +111,14 @@ class CanonicalGaussianModel(nn.Module):
         self._scaling = nn.Parameter(torch.empty(0, 3))
         self._rotation = nn.Parameter(torch.empty(0, 4))
         self._opacity = nn.Parameter(torch.empty(0, 1))
+        # Owned by gaussians/densify.py; None until attach_optimizer /
+        # init_densify_stats run (Commit 5). Declared here so attribute
+        # access is explicit rather than dynamic.
+        self.optimizer: torch.optim.Optimizer | None = None
+        self.percent_dense: float = 0.01
+        self.xyz_gradient_accum: torch.Tensor | None = None
+        self.denom: torch.Tensor | None = None
+        self.max_radii2D: torch.Tensor | None = None
 
     # -- activated accessors -------------------------------------------------
     @property
