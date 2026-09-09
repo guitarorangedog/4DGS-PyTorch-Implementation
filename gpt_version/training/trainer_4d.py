@@ -139,13 +139,20 @@ def init_4d_model(scene: Scene, cfg: FourDTrainerConfig,
 
 def _stage_loop(scene: Scene, model: CanonicalGaussianModel, field: DeformationField,
                 cfg: FourDTrainerConfig, stage: str, iterations: int,
-                device: torch.device) -> list[dict]:
+                device: torch.device, start_iteration: int = 1, loop_rng=None,
+                checkpoint_cb=None) -> list[dict]:
+    """One stage loop. ``start_iteration`` resumes mid-stage (post-checkpoint
+    state represents end-of-iteration ``start_iteration - 1``); ``loop_rng``
+    continues the camera stream; ``checkpoint_cb(stage, iteration, model,
+    field, loop_rng)`` fires end-of-iteration (post-step) when provided."""
     assert stage in ("coarse", "fine")
     bg = torch.tensor(cfg.background, dtype=torch.float32, device=device)
-    rng = random.Random(cfg.seed + (0 if stage == "coarse" else 10_000))
+    if loop_rng is None:
+        loop_rng = random.Random(cfg.seed + (0 if stage == "coarse" else 10_000))
+    rng = loop_rng
     history: list[dict] = []
 
-    for iteration in range(1, iterations + 1):
+    for iteration in range(start_iteration, iterations + 1):
         lrs = update_4d_lrs(model, iteration)
         if iteration % 1000 == 0:
             model.oneupSHdegree()
@@ -218,36 +225,93 @@ def _stage_loop(scene: Scene, model: CanonicalGaussianModel, field: DeformationF
             model.optimizer.step()
             model.optimizer.zero_grad(set_to_none=True)
 
+        if checkpoint_cb is not None:
+            checkpoint_cb(stage, iteration, model, field, rng)
+
     return history
 
 
 def train_coarse(scene: Scene, model: CanonicalGaussianModel, field: DeformationField,
-                 cfg: FourDTrainerConfig, device: torch.device | str = "cuda") -> list[dict]:
+                 cfg: FourDTrainerConfig, device: torch.device | str = "cuda",
+                 start_iteration: int = 1, loop_rng=None, checkpoint_cb=None) -> list[dict]:
     """Coarse stage: fresh optimizer, static rendering (official semantics)."""
     setup_4d_optimizer(model, field, cfg.optim, cfg.deform_optim,
                        spatial_lr_scale=scene.scene_extent)
     return _stage_loop(scene, model, field, cfg, "coarse", cfg.coarse_iterations,
-                       torch.device(device))
+                       torch.device(device), start_iteration, loop_rng, checkpoint_cb)
 
 
 def train_fine(scene: Scene, model: CanonicalGaussianModel, field: DeformationField,
-               cfg: FourDTrainerConfig, device: torch.device | str = "cuda") -> list[dict]:
+               cfg: FourDTrainerConfig, device: torch.device | str = "cuda",
+               start_iteration: int = 1, loop_rng=None, checkpoint_cb=None) -> list[dict]:
     """Fine stage: fresh optimizer, time-conditioned rendering + TV regs."""
     setup_4d_optimizer(model, field, cfg.optim, cfg.deform_optim,
                        spatial_lr_scale=scene.scene_extent)
     return _stage_loop(scene, model, field, cfg, "fine", cfg.fine_iterations,
-                       torch.device(device))
+                       torch.device(device), start_iteration, loop_rng, checkpoint_cb)
+
+
+def _checkpoint_callback(output_dir: str, interval: int, cfg: FourDTrainerConfig):
+    """Build an end-of-iteration checkpoint callback (None when interval<=0)."""
+    if interval <= 0:
+        return None
+    from training.checkpoints import checkpoint_filename, save_checkpoint
+
+    def cb(stage, iteration, model, field, loop_rng):
+        if iteration % interval == 0:
+            save_checkpoint(
+                checkpoint_filename(output_dir, stage, iteration),
+                stage=stage, iteration=iteration, model=model, field=field,
+                loop_rng=loop_rng,
+                extra_meta={"seed": cfg.seed,
+                            "coarse_iterations": cfg.coarse_iterations,
+                            "fine_iterations": cfg.fine_iterations})
+    return cb
 
 
 def train_4d(scene: Scene, model: CanonicalGaussianModel, field: DeformationField,
-             cfg: FourDTrainerConfig, device: torch.device | str = "cuda"
-             ) -> dict[str, list[dict]]:
-    """Full coarse-to-fine run. Returns ``{"coarse": [...], "fine": [...]}``."""
+             cfg: FourDTrainerConfig, device: torch.device | str = "cuda",
+             resume: str | None = None, output_dir: str | None = None,
+             checkpoint_interval: int = 0) -> dict[str, list[dict]]:
+    """Full coarse-to-fine run (or resume). Returns ``{"coarse": [...], "fine": [...]}``.
+
+    Args:
+        resume: checkpoint path. Coarse checkpoints continue coarse at
+            ``N + 1`` then run fine fresh; fine checkpoints continue fine at
+            ``N + 1`` (coarse already complete — history ``"coarse"`` is empty).
+        output_dir: required when ``checkpoint_interval > 0`` (or resume
+            checkpoints should also be written).
+        checkpoint_interval: save end-of-iteration checkpoints every N iters
+            (0 = off).
+    """
+    from training.checkpoints import load_checkpoint, restore_4d_state
+
     device = torch.device(device)
     if not torch.cuda.is_available():
         raise RuntimeError("4D training requires CUDA + the rasterizer extension.")
-    coarse_hist = train_coarse(scene, model, field, cfg, device)
-    fine_hist = train_fine(scene, model, field, cfg, device)
+    cb = _checkpoint_callback(output_dir, checkpoint_interval, cfg) \
+        if output_dir is not None else None
+    if resume is None:
+        coarse_hist = train_coarse(scene, model, field, cfg, device,
+                                   checkpoint_cb=cb)
+        fine_hist = train_fine(scene, model, field, cfg, device,
+                               checkpoint_cb=cb)
+        return {"coarse": coarse_hist, "fine": fine_hist}
+    payload = load_checkpoint(resume, map_location=device)
+    loop_rng = random.Random()
+    restore_4d_state(model, field, payload, cfg.optim, cfg.deform_optim,
+                     device, loop_rng)
+    if payload["stage"] == "coarse":
+        coarse_hist = _stage_loop(scene, model, field, cfg, "coarse",
+                                  cfg.coarse_iterations, device,
+                                  payload["iteration"] + 1, loop_rng, cb)
+        fine_hist = train_fine(scene, model, field, cfg, device,
+                               checkpoint_cb=cb)
+    else:
+        coarse_hist = []
+        fine_hist = _stage_loop(scene, model, field, cfg, "fine",
+                                cfg.fine_iterations, device,
+                                payload["iteration"] + 1, loop_rng, cb)
     return {"coarse": coarse_hist, "fine": fine_hist}
 
 

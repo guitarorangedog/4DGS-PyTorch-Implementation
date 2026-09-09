@@ -27,6 +27,10 @@ def main(argv=None) -> None:
     parser.add_argument("--extension", default=".png")
     parser.add_argument("--background", choices=["white", "black"], default="white")
     parser.add_argument("--no_eval", action="store_true")
+    parser.add_argument("--resume", default=None,
+                        help="resume from checkpoint_*.pth (continues at N+1)")
+    parser.add_argument("--checkpoint_interval", type=int, default=0,
+                        help="save end-of-iteration checkpoints every N iters (0=off)")
     args = parser.parse_args(argv)
 
     set_seed(args.seed)
@@ -42,7 +46,12 @@ def main(argv=None) -> None:
     model, field = init_4d_model(scene, cfg, device=device)
     print(f"Training views: {len(scene.train_views)}, init points: {model.num_points}, "
           f"extent: {scene.scene_extent:.4f}, feat_dim: {field.hexplane.feat_dim}")
-    history = train_4d(scene, model, field, cfg, device=device)
+    if args.resume is not None:
+        print(f"Resuming from {args.resume}")
+    outdir = os.path.abspath(args.output)
+    history = train_4d(scene, model, field, cfg, device=device,
+                       resume=args.resume, output_dir=outdir,
+                       checkpoint_interval=args.checkpoint_interval)
     paths = save_4d_model(model, field, os.path.abspath(args.output), cfg, history)
     print(f"Saved: {paths['ply']} ({model.num_points} points), {paths['deformation']}")
 
