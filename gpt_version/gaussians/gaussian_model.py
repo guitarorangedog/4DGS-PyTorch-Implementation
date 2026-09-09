@@ -116,9 +116,32 @@ class CanonicalGaussianModel(nn.Module):
         # access is explicit rather than dynamic.
         self.optimizer: torch.optim.Optimizer | None = None
         self.percent_dense: float = 0.01
+        #: Scene-extent multiplier for the position LR (official
+        #: ``spatial_lr_scale``, set from the scene radius). The full static
+        #: optimizer + xyz schedule is built by
+        #: ``training/optim.setup_static_optimizer`` (Commit 8).
+        self.spatial_lr_scale: float = 1.0
         self.xyz_gradient_accum: torch.Tensor | None = None
         self.denom: torch.Tensor | None = None
         self.max_radii2D: torch.Tensor | None = None
+        #: Exponential xyz LR schedule, installed by ``setup_static_optimizer``.
+        self.xyz_schedule = None
+
+    def static_param_groups(self) -> list[tuple[str, nn.Parameter]]:
+        """Named ``(group_name, parameter)`` pairs for optimizer construction.
+
+        Order and names match the official ``training_setup`` static subset
+        (``xyz``, ``f_dc``, ``f_rest``, ``opacity``, ``scaling``, ``rotation``)
+        so Commit 5 surgery and the Commit 8 trainer share one contract.
+        """
+        return [
+            ("xyz", self._xyz),
+            ("f_dc", self._features_dc),
+            ("f_rest", self._features_rest),
+            ("opacity", self._opacity),
+            ("scaling", self._scaling),
+            ("rotation", self._rotation),
+        ]
 
     # -- activated accessors -------------------------------------------------
     @property

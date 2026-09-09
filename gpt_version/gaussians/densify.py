@@ -72,8 +72,10 @@ OPACITY_RESET_CAP = 0.01
 def attach_optimizer(model, lr: float = 1e-3) -> torch.optim.Adam:
     """Attach a minimal single-LR Adam with the six official group names.
 
-    Exists only so densification surgery is testable now; per-parameter
-    learning rates and schedulers belong to the Commit 8 trainer.
+    Minimal test helper retained from Commit 5. The canonical training path
+    is ``training/optim.setup_static_optimizer`` (Commit 8), which assigns
+    the official per-group LRs; both go through the same generic surgery
+    helpers below, so population control works identically either way.
 
     Args:
         model: :class:`CanonicalGaussianModel` with initialized parameters.
