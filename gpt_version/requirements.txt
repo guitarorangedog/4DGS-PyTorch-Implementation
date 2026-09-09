@@ -1,0 +1,15 @@
+# Runtime dependencies for gpt_version.
+# CUDA rasterizer is NOT installed from here; see setup_rasterizer.md.
+# Torch/CUDA build must match the host (RunPod RTX A6000); no exact torch pin here.
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+plyfile>=0.8
+tqdm>=4.65
+imageio>=2.30
+imageio-ffmpeg>=0.4.9
+lpips>=0.1.4
+pytorch-msssim>=0.2.1
+pillow>=9.0

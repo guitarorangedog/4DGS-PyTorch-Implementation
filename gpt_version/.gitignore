@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Outputs and data (never commit)
+output/
+checkpoints/
+*.ply
+*.mp4
+*.png
+
+# Logs and editor
+*.log
+runs/
+.vscode/
+.idea/
+.DS_Store
