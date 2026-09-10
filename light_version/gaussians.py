@@ -51,6 +51,20 @@ class CanonicalGaussians(nn.Module):
         colors = torch.sigmoid(self.colors_raw)
         return self.means, scales, quats, opacity, colors
 
+    def deformed_activated(self, field, t):
+        """Canonical raws + RAW offsets at time t -> ACTIVATED render params.
+
+        Field is queried at CANONICAL means (not deformed ones). Opacity and
+        color stay static; only position/scale/rotation deform. Sequence:
+        raw canonical -> +raw offset -> raw deformed -> activation."""
+        dmean, dscale, dquat = field(self.means, t)  # RAW offsets [N,3],[N,3],[N,4]
+        means_t = self.means + dmean
+        log_scales_t = self.log_scales + dscale
+        quats_raw_t = self.quats_raw + dquat
+        quats_t = quats_raw_t / quats_raw_t.norm(dim=1, keepdim=True)
+        return (means_t, torch.exp(log_scales_t), quats_t,
+                torch.sigmoid(self.opacity_logits), torch.sigmoid(self.colors_raw))
+
 
 if __name__ == "__main__":
     gs = CanonicalGaussians.random(N=5, extent=0.8, seed=0)

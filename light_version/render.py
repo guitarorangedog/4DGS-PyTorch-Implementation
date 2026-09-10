@@ -75,6 +75,11 @@ def render(camera, means, scales, quats, opacity, colors, eps=1e-4):
     return image + T * torch.ones(3, device=device)               # white background
 
 
+def render_dynamic(camera, gaussians, field, time):
+    """Thin time-conditioned wrapper: deform canonical raws, static render."""
+    return render(camera, *gaussians.deformed_activated(field, time))
+
+
 if __name__ == "__main__":
     R, t = look_at(eye=(0.0, 0.0, 3.0), center=(0.0, 0.0, 0.0))
     cam = PinholeCamera(R, t, fx=64.0, fy=64.0, cx=32.0, cy=32.0, H=64, W=64)
@@ -101,3 +106,31 @@ if __name__ == "__main__":
         print("saved /tmp/light_render.png")
     except ImportError:
         pass
+
+    print("--- dynamic (Commit 8): canonical + field(t) -> render ---")
+    from gaussians import CanonicalGaussians
+    from deformation import DeformationField
+    gs = CanonicalGaussians.random(N=3, extent=0.5, seed=0)
+    field = DeformationField()
+    m0 = gs.deformed_activated(field, 0.0)[0]
+    m1 = gs.deformed_activated(field, 1.0)[0]
+    print(f"canonical means: {gs.means.detach().tolist()}")
+    print(f"identity init: max|deformed-canonical|={(m0 - gs.means).abs().max():.2e}, "
+          f"max|t1-t0|={(m1 - m0).abs().max():.2e} (both ~0 expected)")
+    img0, img1 = render_dynamic(cam, gs, field, 0.0), render_dynamic(cam, gs, field, 1.0)
+    print(f"dynamic shapes={tuple(img0.shape)},{tuple(img1.shape)} "
+          f"finite={torch.isfinite(img0).all().item() and torch.isfinite(img1).all().item()} "
+          f"|img1-img0|={(img0 - img1).abs().max():.2e} (0 = identical at init, expected)")
+    img0.mean().backward()  # honest zero-init check: final-layer grad exists, HexPlane gets ~0
+    hx = field.hexplane.xy.grad
+    print(f"grads at zero init: means={gs.means.grad is not None}, "
+          f"final-layer={field.decoder[2].weight.grad.abs().sum().item():.2e}, "
+          f"hexplane={'none' if hx is None else f'{hx.abs().sum().item():.2e} (~0 expected)'}")
+    with torch.no_grad():  # sanity-check ONLY: nudge final layer so time signal reaches HexPlane
+        field.decoder[2].weight.copy_(0.1 * torch.randn_like(field.decoder[2].weight))
+    gs.zero_grad()
+    field.zero_grad()
+    j0, j1 = render_dynamic(cam, gs, field, 0.0), render_dynamic(cam, gs, field, 1.0)
+    j0.mean().backward()
+    print(f"after nudge: |img1-img0|={(j0 - j1).abs().max():.2e} (>0 = time-conditioned), "
+          f"hexplane grad={field.hexplane.xy.grad.abs().sum().item():.2e} (>0 = full path works)")
