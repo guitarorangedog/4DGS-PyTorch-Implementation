@@ -31,7 +31,8 @@ def evaluate(ds, gs, field):
     return l1 / len(ds), -10 * math.log10(mse / len(ds))
 
 
-def main(coarse_iters=300, fine_iters=1500, coarse_lr=0.05, fine_lr=0.005, seed=0):
+def train_model(coarse_iters=300, fine_iters=1500, coarse_lr=0.05, fine_lr=0.005, seed=0):
+    """Full coarse-to-fine fit; returns (canonical Gaussians, field, dataset)."""
     torch.manual_seed(seed)
     g = torch.Generator().manual_seed(seed)
     ds = TinyDynamicDataset()                       # 32 fixed targets: 4 cams x 8 times
@@ -108,7 +109,8 @@ def main(coarse_iters=300, fine_iters=1500, coarse_lr=0.05, fine_lr=0.005, seed=
             print("saved /tmp/light_4dgs_t0.png tmid t1 (camera 0)")
         except ImportError:
             pass
+    return gs, field, ds
 
 
 if __name__ == "__main__":
-    main()
+    train_model()

@@ -24,6 +24,12 @@ QUATS = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 3)
 OPACITY = torch.full((3, 1), 0.9)
 
 
+def ground_truth_frame(camera, t):
+    """Analytic ground truth at ARBITRARY continuous t (reuses means_at)."""
+    with torch.no_grad():
+        return render(camera, means_at(t), SCALES, QUATS, OPACITY, COLORS)
+
+
 def means_at(t):
     """Analytic trajectories (t is a float in [0, 1]); each is one line."""
     t = float(t)

@@ -56,3 +56,33 @@ python3 -c "import cameras, gaussians, render, dataset, deformation, train, demo
 ```
 
 Run from inside `light_version/`.
+
+## Run the full pipeline (final workflow)
+
+From the repo root:
+
+```bash
+python3 light_version/cameras.py      # camera math sanity check
+python3 light_version/gaussians.py    # raw -> activated sanity check
+python3 light_version/render.py       # static + dynamic rendering checks
+python3 light_version/dataset.py      # 32-observation dynamic scene check
+python3 light_version/deformation.py  # HexPlane-lite sanity check
+python3 light_version/train.py        # coarse-to-fine 4DGS training (~16 s)
+python3 light_version/demo.py         # novel-time interpolation + GIF
+```
+
+`train.py` learns the tiny scene (`train_model()` returns canonical
+Gaussians, field, dataset). `demo.py` reuses it, trains once, then renders
+UNSEEN timestamps with no further optimization into `light_version/out/`.
+
+## Two implementation-specific lessons (Commit 9)
+
+These describe THIS tiny implementation, NOT the original paper:
+
+1. The six-plane product attenuates strongly, so planes need reasonably
+   large initial values (here `randn * 1.5`, features ~0.1). Values that are
+   too small make features ~1e-4, leaving the decoder's hidden units
+   input-independent so the field can only learn a global shift.
+2. Joint dynamic optimization uses a smaller rate (0.005) than the static
+   warmup (0.05): oversized steps eject Gaussians out of view, after which
+   moving them changes nothing and the field's gradients die exactly.
