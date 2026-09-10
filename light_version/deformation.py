@@ -20,9 +20,10 @@ class HexPlaneLite(nn.Module):
     def __init__(self, res=32, dim=8):
         super().__init__()
         self.res, self.dim = res, dim
-        for name in PLANES:  # random init on ALL six (0.5 scale keeps the
-            # 6-way product visible); decoder starts at zero anyway, so delta ~ 0
-            self.register_parameter(name, nn.Parameter(torch.randn(1, dim, res, res) * 0.5))
+        for name in PLANES:  # random init on ALL six (scale 1.5: the 6-way
+            # product attenuates strongly, and features ~0.1 keep the decoder
+            # in a regime where (X,t) actually modulate its hidden units)
+            self.register_parameter(name, nn.Parameter(torch.randn(1, dim, res, res) * 1.5))
 
     def sample(self, plane, a, b):
         """Sample plane P(a,b) at coords a,b in [-1,1] -> [N,D].

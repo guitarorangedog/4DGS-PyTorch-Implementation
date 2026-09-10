@@ -1,71 +1,113 @@
-"""Commit 5: fit STATIC Gaussians from one view (no time yet).
+"""Commit 9: minimal coarse-to-fine 4DGS training on the tiny dynamic scene.
 
-Loop taught here:
-  raw params -> activated() -> render() -> L1 vs target -> backward -> Adam.
-Target image is made with the SAME renderer, so this tests gradients,
-not rendering fidelity. Fixed N=3, one 64x64 camera, plain Adam + L1.
+coarse = static warmup: fit canonical Gaussians to all 4 cameras at ONE
+  existing reference timestamp with the STATIC renderer (field frozen).
+fine = joint dynamic fit: optimize canonical Gaussians + deformation field
+  on random (camera, time) samples with render_dynamic(). Plain L1 + Adam.
+(Simplified educational reading of the paper's coarse-to-fine schedule.)
 """
+
+import math
 
 import torch
 
-from cameras import PinholeCamera, look_at
+from dataset import TinyDynamicDataset
+from deformation import DeformationField
 from gaussians import CanonicalGaussians
-from render import render
+from render import render, render_dynamic
 
-torch.set_num_threads(min(8, torch.get_num_threads()))  # tiny 64x64 tensors: avoid many-thread overhead
-
-
-def make_camera():
-    R, t = look_at(eye=(0.0, 0.0, 3.0), center=(0.0, 0.0, 0.0))
-    return PinholeCamera(R, t, fx=64.0, fy=64.0, cx=32.0, cy=32.0, H=64, W=64)
+torch.set_num_threads(min(8, torch.get_num_threads()))  # tiny tensors: avoid many-thread overhead
 
 
-def make_target():
-    """3 hand-placed Gaussians: red-left, green-right, blue-top."""
-    means = torch.tensor([[-0.6, 0.0, 0.0], [0.6, 0.0, 0.0], [0.0, 0.7, 0.0]])
-    log_scales = torch.full((3, 3), -1.3863)          # log(0.25)
-    quats_raw = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 3)
-    opacity_logits = torch.full((3, 1), 2.1972)       # sigmoid = 0.9
-    colors_raw = torch.tensor([[2.2, -2.2, -2.2],     # ~red
-                               [-2.2, 2.2, -2.2],     # ~green
-                               [-2.2, -2.2, 2.2]])    # ~blue
-    return CanonicalGaussians(means, log_scales, quats_raw, opacity_logits, colors_raw)
+def evaluate(ds, gs, field):
+    """Full 32-observation mean L1 + PSNR (reporting only, no gradients)."""
+    l1, mse = 0.0, 0.0
+    with torch.no_grad():
+        for i in range(len(ds)):
+            s = ds[i]
+            d = render_dynamic(s["camera"], gs, field, s["time"]) - s["image"]
+            l1 += d.abs().mean().item()
+            mse += (d ** 2).mean().item()
+    return l1 / len(ds), -10 * math.log10(mse / len(ds))
 
 
-def main(iters=300, lr=0.05, seed=0):
+def main(coarse_iters=300, fine_iters=1500, coarse_lr=0.05, fine_lr=0.005, seed=0):
     torch.manual_seed(seed)
-    cam = make_camera()
-    with torch.no_grad():                             # target is NOT optimized
-        target = render(cam, *make_target().activated())
+    g = torch.Generator().manual_seed(seed)
+    ds = TinyDynamicDataset()                       # 32 fixed targets: 4 cams x 8 times
+    ref = len(ds.times) // 2                        # middle existing observation
+    t_ref = ds.times[ref]
+    print(f"reference timestamp: index {ref} -> t={t_ref.item():.4f} (existing, not invented)")
+    gs = CanonicalGaussians.random(N=3, extent=0.8, seed=seed)
+    field = DeformationField()                      # zero final layer: identity at start
 
-    gs = CanonicalGaussians.random(N=3, extent=0.8, seed=seed)  # learnable
-    opt = torch.optim.Adam(gs.parameters(), lr=lr)    # all raw params, one lr
-    init_loss = None
-    for i in range(iters + 1):
-        image = render(cam, *gs.activated())
-        loss = (image - target).abs().mean()          # plain L1
-        if i == 0:
-            init_loss = loss.item()
-        if i % 50 == 0:
-            print(f"iter {i:4d} | L1 = {loss.item():.5f}")
-        if i < iters:
+    # STAGE A (coarse): static fit at t_ref, field frozen (not in optimizer).
+    opt = torch.optim.Adam(gs.parameters(), lr=coarse_lr)
+    for i in range(coarse_iters + 1):
+        c = torch.randint(0, len(ds.cameras), (1,), generator=g).item()
+        s = ds[c * len(ds.times) + ref]             # random camera, fixed t_ref
+        loss = (render(s["camera"], *gs.activated()) - s["image"]).abs().mean()
+        if i % 100 == 0:
+            print(f"[coarse] iter {i:4d} | L1 = {loss.item():.5f}")
+        if i < coarse_iters:
             opt.zero_grad()
             loss.backward()
             opt.step()
-    final_loss = loss.item()
-    means, _, _, _, colors = gs.activated()
-    print(f"initial L1 = {init_loss:.5f} | final L1 = {final_loss:.5f} "
-          f"| improved = {final_loss < init_loss}")
-    print(f"learned means: {means.detach().tolist()}")
-    print(f"learned colors: {colors.detach().tolist()}")
-    try:
-        from PIL import Image
-        import numpy as np
-        Image.fromarray((target.clamp(0, 1).numpy() * 255).astype(np.uint8)).save("/tmp/light_target.png")
-        Image.fromarray((image.detach().clamp(0, 1).numpy() * 255).astype(np.uint8)).save("/tmp/light_fitted.png")
-        print("saved /tmp/light_target.png /tmp/light_fitted.png")
-    except ImportError:
-        pass
+
+    l1_before, psnr_before = evaluate(ds, gs, field)
+    print(f"after coarse: full-dataset L1 = {l1_before:.5f} PSNR = {psnr_before:.2f}")
+
+    # STAGE B (fine): joint fit on random (camera, time) samples.
+    # One small shared rate: coarse already placed canonical well, so fine
+    # only refines it while the field grows deltas from zero. (A large rate
+    # here thrashes canonical across conflicting timestamps and ejects
+    # Gaussians out of view, killing the field's gradients.)
+    opt = torch.optim.Adam(list(gs.parameters()) + list(field.parameters()), lr=fine_lr)
+    first_grads, mid_grads = None, None
+    for i in range(fine_iters + 1):
+        s = ds[torch.randint(0, len(ds), (1,), generator=g).item()]
+        loss = (render_dynamic(s["camera"], gs, field, s["time"]) - s["image"]).abs().mean()
+        if i % 300 == 0:
+            print(f"[fine]   iter {i:4d} | L1 = {loss.item():.5f}")
+        if i < fine_iters:
+            opt.zero_grad()
+            loss.backward()
+            if i == 0:  # Commit-8 behavior live: final layer learns first, HexPlane ~0
+                first_grads = (field.decoder[2].weight.grad.abs().sum().item(),
+                               None if field.hexplane.xy.grad is None else
+                               field.hexplane.xy.grad.abs().sum().item())
+            if i == 200:  # after final weights move, HexPlane should receive grads
+                mid_grads = field.hexplane.xy.grad.abs().sum().item()
+            opt.step()
+    print(f"first fine step: final-layer grad={first_grads[0]:.2e}, hexplane grad={first_grads[1]}")
+    print(f"later fine step: hexplane grad={mid_grads:.2e} (>0 = field is learning)")
+
+    l1_after, psnr_after = evaluate(ds, gs, field)
+    print(f"after fine: full-dataset L1 = {l1_after:.5f} PSNR = {psnr_after:.2f} "
+          f"| improved = {l1_after < l1_before}")
+
+    with torch.no_grad():  # deformation really learned? positions must vary with time
+        t_mid = ds.times[ref]
+        m0 = gs.deformed_activated(field, 0.0)[0]
+        mm = gs.deformed_activated(field, t_mid)[0]
+        m1 = gs.deformed_activated(field, 1.0)[0]
+        print(f"deformed means t=0:   {m0.tolist()}")
+        print(f"deformed means t=mid: {mm.tolist()}")
+        print(f"deformed means t=1:   {m1.tolist()}")
+        print(f"mean |means(t=0)-means(t=1)| = {(m0 - m1).abs().mean().item():.4f} (>0 = dynamic)")
+        f0 = render_dynamic(ds.cameras[0], gs, field, ds.times[0])
+        f1 = render_dynamic(ds.cameras[0], gs, field, ds.times[-1])
+        print(f"cam0 |frame(t=0)-frame(t=1)| = {(f0 - f1).abs().mean().item():.4f} (>0 = visibly dynamic)")
+        try:
+            from PIL import Image
+            import numpy as np
+            for name, t in [("t0", ds.times[0]), ("tmid", t_mid), ("t1", ds.times[-1])]:
+                img = render_dynamic(ds.cameras[0], gs, field, t)
+                Image.fromarray((img.clamp(0, 1).numpy() * 255).astype(np.uint8)
+                                ).save(f"/tmp/light_4dgs_{name}.png")
+            print("saved /tmp/light_4dgs_t0.png tmid t1 (camera 0)")
+        except ImportError:
+            pass
 
 
 if __name__ == "__main__":
